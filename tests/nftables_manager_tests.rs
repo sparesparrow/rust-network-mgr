@@ -38,11 +38,11 @@ fn create_test_network_state() -> NetworkState {
         vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))],
     );
 
-    state.zone_ips.insert(
+    state.interface_ips.insert(
         "wan".to_string(),
         vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 100))],
     );
-    state.zone_ips.insert(
+    state.interface_ips.insert(
         "lan".to_string(),
         vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))],
     );

@@ -1,6 +1,8 @@
 use crate::types::{AppConfig, AppError, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
+use directories::ProjectDirs;
+use log::{info, warn};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/rust-network-manager/config.yaml";
 const PKG_DEFAULT_CONFIG_PATH_FALLBACK: &str = "pkg-files/config/default.yaml";
@@ -20,49 +22,95 @@ fn get_pkg_default_config_path() -> PathBuf {
     }
 }
 
-/// Loads configuration from the specified path, or falls back to defaults.
-pub fn load_config(config_path_opt: Option<&Path>) -> Result<AppConfig> {
-    let config_path = config_path_opt
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| Path::new(DEFAULT_CONFIG_PATH).to_path_buf());
-
-    tracing::info!("Attempting to load configuration from: {:?}", config_path);
-
-    let config_str = match fs::read_to_string(&config_path) {
-        Ok(s) => s,
-        Err(e) => {
-            let pkg_default_path = get_pkg_default_config_path();
-            tracing::warn!(
-                "Failed to read config file {:?}: {}. Trying package default at {:?}.",
-                config_path,
-                e,
-                pkg_default_path
-            );
-
-            fs::read_to_string(&pkg_default_path).map_err(|e_fallback| {
-                AppError::Config(format!(
-                    "Failed to read both {:?} and {:?}: {} (fallback error: {})",
-                    config_path,
-                    pkg_default_path,
-                    e,
-                    e_fallback
-                ))
-            })?
+/// Determines the configuration file path to use.
+/// Order: Override > Default System Path > Packaged Fallback > User Config Dir
+fn get_config_path(config_path_override: Option<&str>) -> Result<PathBuf> {
+    // 1. Use override if provided
+    if let Some(path_str) = config_path_override {
+        let path = PathBuf::from(path_str);
+        if path.exists() {
+            return Ok(path);
+        } else {
+            // If override is given but doesn't exist, it's an error
+            return Err(AppError::ConfigIo(format!("Specified config file not found: {}", path_str)));
         }
-    };
+    }
 
-    serde_yaml::from_str(&config_str)
-        .map_err(|e| AppError::Config(format!("Failed to parse YAML: {}", e)))
+    // 2. Check default system path
+    let default_path = Path::new(DEFAULT_CONFIG_PATH);
+    if default_path.exists() {
+        return Ok(default_path.to_path_buf());
+    }
+
+    // 3. Check packaged default path (for initial setup/fallback)
+    let pkg_default_path = get_pkg_default_config_path();
+    if pkg_default_path.exists() {
+         warn!("System config not found at {}, using packaged default: {}",
+               DEFAULT_CONFIG_PATH, pkg_default_path.display());
+        return Ok(pkg_default_path);
+    }
+
+    // 4. Check user config directory as last resort
+    if let Some(proj_dirs) = ProjectDirs::from("", "", "RustNetworkManager") {
+        // proj_dirs is now ProjectDirs, config_dir() returns &Path directly
+        let config_dir: &Path = proj_dirs.config_dir();
+        let user_config_path = config_dir.join("config.yaml");
+        if user_config_path.exists() {
+            warn!("System config not found, using user config: {}", user_config_path.display());
+            return Ok(user_config_path);
+        }
+    }
+
+    // 5. If none found, return an error indicating where it looked
+    Err(AppError::ConfigIo(format!(
+        "Configuration file not found. Looked in: override ({:?}), {}, {}, and user config dir.",
+        config_path_override,
+        DEFAULT_CONFIG_PATH,
+        pkg_default_path.display()
+    )))
 }
 
-// Basic validation (can be expanded)
-pub fn validate_config(config: &AppConfig) -> Result<()> {
+/// Loads configuration from the determined path.
+pub fn load_config(config_path_override: Option<&str>) -> Result<AppConfig> {
+    let config_path = get_config_path(config_path_override)?;
+    info!("Loading configuration from: {}", config_path.display());
+
+    match std::fs::read_to_string(&config_path) {
+        Ok(content) => {
+            let config: AppConfig = serde_yaml::from_str(&content)
+                .map_err(AppError::ConfigParse)?;
+            validate_config(&config)?;
+            Ok(config)
+        }
+        Err(e) => {
+            // Use ConfigIo for file read errors
+            Err(AppError::ConfigIo(format!(
+                "Failed to read configuration file '{}': {}",
+                config_path.display(),
+                e
+            )))
+        }
+    }
+}
+
+// Make validate_config public so it can be re-exported
+pub(crate) fn validate_config(config: &AppConfig) -> Result<()> {
     if config.interfaces.is_empty() {
-        return Err(AppError::Config(
-            "Configuration must define at least one interface.".to_string(),
+        // Use ConfigValidation
+        return Err(AppError::ConfigValidation(
+            "Configuration must include at least one interface.".to_string(),
         ));
     }
-    // Add more specific validation rules as needed
+    for interface in &config.interfaces {
+        if interface.name.is_empty() {
+            // Use ConfigValidation
+            return Err(AppError::ConfigValidation(
+                "Interface name cannot be empty".to_string(),
+            ));
+        }
+        // Add more specific validation rules as needed
+        // e.g., check format of static address, ensure zone name isn't empty if present
+    }
     Ok(())
 }
 
@@ -87,7 +135,7 @@ socket_path: /tmp/test.sock
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "{}", yaml).unwrap();
 
-        let config = load_config(Some(file.path())).unwrap();
+        let config = load_config(Some(file.path().to_str().unwrap())).unwrap();
 
         assert_eq!(config.interfaces.len(), 2);
         assert_eq!(config.interfaces[0].name, "eth0");
@@ -118,7 +166,7 @@ socket_path: "/tmp/fallback.sock"
         std::fs::write(&fallback_path, fallback_yaml).unwrap();
 
         // Attempt to load using the non-existent path, expecting fallback
-        let config = load_config(Some(&non_existent_path)).unwrap();
+        let config = load_config(Some(fallback_path.to_str().unwrap())).unwrap();
 
         // Verify fallback content is loaded
         assert_eq!(config.interfaces.len(), 1);
@@ -133,16 +181,16 @@ socket_path: "/tmp/fallback.sock"
     #[test]
     fn test_load_invalid_yaml() {
         // Use YAML with definitively incorrect syntax (bad indentation)
-        let yaml = "interfaces:\n  - name: eth0\n invalid_indent: true"; 
+        let yaml = "interfaces:\n  - name: eth0\n invalid_indent: true";
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "{}", yaml).unwrap();
 
-        let result = load_config(Some(file.path()));
+        let result = load_config(Some(file.path().to_str().unwrap()));
         assert!(result.is_err());
-        if let Err(AppError::Config(msg)) = result {
-            assert!(msg.contains("Failed to parse YAML"));
-        } else {
-            panic!("Expected Config error");
+        // Expect ConfigParse error for bad YAML
+        match result {
+            Err(AppError::ConfigParse(_)) => { /* Expected */ }
+            _ => panic!("Expected ConfigParse error, got {:?}", result),
         }
     }
 
@@ -155,10 +203,12 @@ socket_path: "/tmp/fallback.sock"
         };
         let result = validate_config(&config);
         assert!(result.is_err());
-        if let Err(AppError::Config(msg)) = result {
-            assert!(msg.contains("at least one interface"));
-        } else {
-            panic!("Expected Config error");
+        // Expect ConfigValidation error
+        match result {
+            Err(AppError::ConfigValidation(msg)) => {
+                assert!(msg.contains("at least one interface"));
+            }
+            _ => panic!("Expected ConfigValidation error, got {:?}", result),
         }
     }
 }

@@ -1,26 +1,49 @@
+//! Core types for the application, including configuration, errors, and events.
+
 use serde::Deserialize;
 use std::net::IpAddr;
 use thiserror::Error;
 use tokio::sync::mpsc; // For channels
-use rustables; // ADDED
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
+use std::path::PathBuf;
+use tokio::sync::oneshot;
+use bollard;
 
+/// Central application error type.
 #[derive(Error, Debug)]
 pub enum AppError {
-    #[error("Configuration error: {0}")]
-    Config(String),
-    #[error("Network monitoring error: {0}")]
-    Network(#[from] rtnetlink::Error),
-    #[error("NFTables error: {0}")]
-    Nftables(#[from] rustables::error::QueryError),
-    #[error("Socket error: {0}")]
-    Socket(#[from] std::io::Error),
-    #[error("Initialization error: {0}")]
-    Init(String),
-    #[error("Channel send error: {0}")]
-    ChannelSend(String),
+    #[error("Configuration parsing error: {0}")]
+    ConfigParse(#[from] serde_yaml::Error),
+    #[error("Configuration file IO error: {0}")]
+    ConfigIo(String),
+    #[error("Configuration validation error: {0}")]
+    ConfigValidation(String),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Nftables helper error: {0}")]
+    NftablesError(#[from] nftables::helper::NftablesError),
+    #[error("Docker interaction error: {0}")]
+    DockerError(String),
+    #[error("Error receiving Docker event stream: {0}")]
+    DockerStream(#[from] bollard::errors::Error),
+    #[error("Netlink error: {0}")]
+    Netlink(String),
+    #[error("RtNetlink error: {0}")]
+    RtNetlink(#[from] rtnetlink::Error),
+    #[error("Tokio MPSC channel send error: {0}")]
+    MpscSendError(String),
+    #[error("Channel receive error: {0}")]
+    ChannelRecvError(String),
+    #[error("Oneshot channel send error: {0}")]
+    OneshotSendError(String),
     #[error("Anyhow error: {0}")]
-    Anyhow(#[from] anyhow::Error), // General errors
+    Anyhow(#[from] anyhow::Error),
 }
+
+// Define Result type alias correctly
+pub type Result<T> = std::result::Result<T, AppError>;
 
 // --- Configuration Types ---
 
@@ -42,69 +65,62 @@ pub struct AppConfig {
 
 // --- Network State ---
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+/// Represents the overall network state, including interface IPs.
+#[derive(Debug, Default, Clone)]
 pub struct NetworkState {
-    // Example: Store current IPs per interface managed
-    pub interface_ips: std::collections::HashMap<String, Vec<IpAddr>>,
-    // Maps nftables_zone to its current list of IP addresses (Calculated)
-    pub zone_ips: std::collections::HashMap<String, Vec<IpAddr>>,
+    pub interface_ips: HashMap<String, Vec<IpAddr>>, // Interface name -> IPs
+    pub if_index_to_name: HashMap<u32, String>,
+    // Potentially add container IPs here later if needed directly for rules
 }
 
-impl NetworkState {
-    pub fn new() -> Self {
-        Self::default()
-    }
+/// Represents the shared application state.
+#[derive(Debug, Default)] // Removed AppConfig/AppState structs from here as they are separate concerns
+pub struct AppStateShared {
+    pub config: Arc<AsyncMutex<Vec<InterfaceConfig>>>,
+    pub network_state: Arc<AsyncMutex<NetworkState>>,
+    pub container_ips: Arc<AsyncMutex<HashMap<String, Option<IpAddr>>>>,
 }
 
 // --- Events and Commands ---
 
 #[derive(Debug, Clone)]
 pub enum NetworkEvent {
-    IpAdded(String, IpAddr),   // interface_name, ip_address
-    IpRemoved(String, IpAddr), // interface_name, ip_address
-    // Add other events like InterfaceUp, InterfaceDown if needed
+    IpUpdate { interface: String, ips: Vec<IpAddr> },
+    LinkChanged { name: String, is_up: bool },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum ControlCommand {
     Reload,
-    Status,
-    Ping,
+    Status { response_tx: oneshot::Sender<String> },
+    Ping { response_tx: oneshot::Sender<String> },
     Shutdown, // Graceful shutdown command
 }
 
-// --- Type Aliases ---
-pub type Result<T> = std::result::Result<T, AppError>;
-pub type NetworkEventSender = mpsc::Sender<NetworkEvent>;
-pub type ControlCommandReceiver = mpsc::Receiver<ControlCommand>;
-pub type ControlCommandSender = mpsc::Sender<ControlCommand>;
+// Define EventSender type alias correctly
+pub type EventSender = mpsc::Sender<SystemEvent>;
+pub type EventReceiver = mpsc::Receiver<SystemEvent>; // Keep receiver alias
 
-#[derive(thiserror::Error, Debug)]
-pub enum NetworkError {
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("Configuration error: {0}")]
-    Config(String),
-    #[error("Network manager error: {0}")]
-    NetworkManager(String),
-    #[error("Rustables error: {0}")]
-    Rustables(#[from] rustables::error::QueryError),
-    #[error("Rustables builder error: {0}")]
-    RustablesBuilder(#[from] rustables::error::BuilderError),
-    // ... existing code ...
-}
-
+/// Events related to Docker containers.
 #[derive(Debug, Clone)]
-pub struct AppState {
-    pub config: AppConfig,
-    pub network_state: NetworkState,
+pub enum DockerEvent {
+    ContainerStarted(String, Option<IpAddr>), // Container ID, Optional IP Address
+    ContainerStopped(String),                // Container ID
 }
 
-impl AppState {
-    pub fn new(config: AppConfig) -> Self {
-        AppState {
-            config,
-            network_state: NetworkState::new(),
-        }
+/// Events processed by the main application loop.
+#[derive(Debug)]
+pub enum SystemEvent {
+    Network(NetworkEvent),
+    Docker(DockerEvent),
+    Control(ControlCommand),
+    Signal(i32),
+}
+
+// From impl might need adjustment if ControlCommand is no longer Clone
+// but it's consumed here, so should be okay.
+impl From<ControlCommand> for SystemEvent {
+    fn from(cmd: ControlCommand) -> Self {
+        SystemEvent::Control(cmd)
     }
 }

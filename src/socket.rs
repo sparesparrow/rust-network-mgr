@@ -1,8 +1,10 @@
-use crate::types::{AppError, ControlCommand, ControlCommandSender, Result};
+use crate::types::{AppError, ControlCommand, Result, EventSender, SystemEvent};
 use directories::ProjectDirs; // Changed from BaseDirs to ProjectDirs for runtime path
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncWriteExt, AsyncReadExt, BufReader, AsyncBufReadExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::{mpsc, oneshot}; // Import mpsc and oneshot
+use log::{info, warn, error}; // Keep log imports
 
 const SOCKET_FILE: &str = "rust-network-manager.sock";
 
@@ -39,115 +41,126 @@ fn get_socket_path(config_path: Option<&str>) -> Result<PathBuf> {
 }
 
 pub struct SocketHandler {
-    listener: UnixListener,
-    command_sender: ControlCommandSender,
+    socket_path: PathBuf,
+    event_sender: EventSender,
 }
 
 impl SocketHandler {
-    pub async fn new(config_socket_path: Option<&str>, command_sender: ControlCommandSender) -> Result<Self> {
+    pub async fn new(config_socket_path: Option<&str>, event_sender: EventSender) -> Result<Self> {
         let socket_path = get_socket_path(config_socket_path)?;
-        tracing::info!("Attempting to bind control socket at: {:?}", socket_path);
+        info!("Attempting to bind control socket at: {:?}", socket_path);
 
-        // Ensure the path exists and clean up old socket if present
         if socket_path.exists() {
-            tracing::warn!("Existing socket file found at {:?}. Removing.", socket_path);
+            warn!("Existing socket file found at {:?}. Removing.", socket_path);
             std::fs::remove_file(&socket_path)
-                .map_err(|e| AppError::Init(format!("Failed to remove old socket: {}", e)))?;
+                .map_err(|e| AppError::Io(e))?;
         }
+
         if let Some(parent) = socket_path.parent() {
              if !parent.exists() {
-                 std::fs::create_dir_all(parent).map_err(|e| AppError::Init(format!("Failed to create socket directory: {}", e)))?;
+                info!("Creating socket directory: {:?}", parent);
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| AppError::Io(e))?;
              }
         }
 
-        let listener = UnixListener::bind(&socket_path)
-            .map_err(|e| AppError::Socket(e))?;
-
-        // TODO: Set permissions on the socket file (e.g., only allow specific user/group)
-
-        tracing::info!("Control socket listening at: {:?}", socket_path);
-        Ok(SocketHandler { listener, command_sender })
+        Ok(SocketHandler { socket_path, event_sender })
     }
 
-    pub async fn start(self) {
-        tracing::info!("Starting socket command listener loop...");
+    pub async fn start(self) -> Result<()> {
+        let listener = UnixListener::bind(&self.socket_path)
+            .map_err(|e| AppError::Io(e))?;
+
+        info!("Control socket listening on {}", self.socket_path.display());
+
         loop {
-            match self.listener.accept().await {
+            match listener.accept().await {
                 Ok((stream, _addr)) => {
-                    tracing::debug!("Accepted new socket connection");
-                    let sender = self.command_sender.clone();
+                    let sender = self.event_sender.clone();
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_connection(stream, sender).await {
-                            tracing::error!("Error handling socket connection: {}", e);
+                            error!("Error handling socket connection: {}", e);
                         }
                     });
                 }
                 Err(e) => {
-                    tracing::error!("Failed to accept socket connection: {}. Stopping listener.", e);
-                    break; // Stop listening on error
+                    error!("Failed to accept connection: {}", e);
                 }
             }
         }
     }
 
-    async fn handle_connection(stream: UnixStream, sender: ControlCommandSender) -> Result<()> {
-        let mut reader = BufReader::new(stream);
+    async fn handle_connection(mut stream: UnixStream, sender: EventSender) -> Result<()> {
+        let mut reader = BufReader::new(&mut stream);
         let mut line = String::new();
 
-        loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) => { // Connection closed
-                    tracing::debug!("Socket connection closed by peer.");
-                    break;
-                }
-                Ok(_) => {
-                    let command_str = line.trim();
-                    tracing::info!("Received command via socket: {}", command_str);
-                    let command = match command_str {
-                        "reload" => Some(ControlCommand::Reload),
-                        "status" => Some(ControlCommand::Status),
-                        "ping" => Some(ControlCommand::Ping),
-                        "shutdown" => Some(ControlCommand::Shutdown),
-                        _ => {
-                            tracing::warn!("Received unknown command: {}", command_str);
-                             let stream_ref = reader.get_mut(); // Get ref to write response
-                             stream_ref.write_all(b"ERROR: Unknown command\n").await?;
-                            None
-                        }
-                    };
+        match reader.read_line(&mut line).await {
+            Ok(0) => Ok(()),
+            Ok(_) => {
+                let command = line.trim();
+                info!("Received command: {}", command);
 
-                    if let Some(cmd) = command {
-                         let stream_ref = reader.get_mut(); // Get ref to write response
-                         match sender.send(cmd.clone()).await {
-                            Ok(_) => {
-                                tracing::debug!("Sent command {:?} to main loop", cmd);
-                                // Simple ACK for most commands
-                                let response_str: &'static str = match cmd {
-                                    ControlCommand::Ping => "PONG\n",
-                                    ControlCommand::Status => "STATUS command received (response handled by main loop)\n", // Status response is async
-                                    _ => "OK\n",
-                                };
-                                stream_ref.write_all(response_str.as_bytes()).await?;
-                                if matches!(cmd, ControlCommand::Shutdown) {
-                                     tracing::info!("Shutdown command received, closing connection.");
-                                     break; // Close connection after shutdown cmd
-                                }
+                match command {
+                    "reload" => {
+                        sender.send(SystemEvent::Control(ControlCommand::Reload)).await
+                            .map_err(|e| AppError::MpscSendError(format!("Failed to send Reload command: {}", e)))?;
+                        stream.write_all(b"OK: Reload command sent\n").await
+                            .map_err(|e| AppError::Io(e))?;
+                    }
+                    "status" => {
+                        let (tx, rx) = oneshot::channel();
+                        sender.send(SystemEvent::Control(ControlCommand::Status { response_tx: tx })).await
+                             .map_err(|e| AppError::MpscSendError(format!("Failed to send Status command: {}", e)))?;
+                        match rx.await {
+                            Ok(status_response) => {
+                                stream.write_all(status_response.as_bytes()).await
+                                     .map_err(|e| AppError::Io(e))?;
+                                stream.write_all(b"\n").await.map_err(|e| AppError::Io(e))?;
                             }
                             Err(e) => {
-                                tracing::error!("Failed to send command {:?} to main loop: {}", cmd, e);
-                                stream_ref.write_all(b"ERROR: Failed to process command internally\n").await?;
+                                let err_msg = format!("Failed to receive status response: {}", e);
+                                error!("{}", err_msg);
+                                stream.write_all(format!("ERROR: {}\n", err_msg).as_bytes()).await
+                                      .map_err(|e| AppError::Io(e))?;
+                                return Err(AppError::ChannelRecvError(err_msg));
                             }
-                         }
+                        }
+                    }
+                    "ping" => {
+                        let (tx, rx) = oneshot::channel();
+                        sender.send(SystemEvent::Control(ControlCommand::Ping { response_tx: tx })).await
+                             .map_err(|e| AppError::MpscSendError(format!("Failed to send Ping command: {}", e)))?;
+                        match rx.await {
+                            Ok(ping_response) => {
+                                stream.write_all(ping_response.as_bytes()).await
+                                     .map_err(|e| AppError::Io(e))?;
+                                stream.write_all(b"\n").await.map_err(|e| AppError::Io(e))?;
+                            }
+                            Err(e) => {
+                                let err_msg = format!("Failed to receive ping response: {}", e);
+                                error!("{}", err_msg);
+                                stream.write_all(format!("ERROR: {}\n", err_msg).as_bytes()).await
+                                      .map_err(|e| AppError::Io(e))?;
+                                return Err(AppError::ChannelRecvError(err_msg));
+                            }
+                        }
+                    }
+                    "shutdown" => {
+                        info!("Shutdown command received via socket.");
+                         sender.send(SystemEvent::Control(ControlCommand::Shutdown)).await
+                             .map_err(|e| AppError::MpscSendError(format!("Failed to send Shutdown command: {}", e)))?;
+                         stream.write_all(b"OK: Shutdown command sent\n").await
+                             .map_err(|e| AppError::Io(e))?;
+                    }
+                    _ => {
+                        stream.write_all(b"ERROR: Unknown command\n").await
+                             .map_err(|e| AppError::Io(e))?;
                     }
                 }
-                Err(e) => { // Read error
-                    tracing::error!("Error reading from socket: {}", e);
-                    break;
-                }
+                Ok(())
             }
+            Err(e) => Err(AppError::Io(e)),
         }
-        Ok(())
     }
 }
 
