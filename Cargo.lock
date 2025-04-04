@@ -657,7 +657,7 @@ dependencies = [
 
 [[package]]
 name = "rust-network-mgr"
-version = "0.1.2"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "directories",

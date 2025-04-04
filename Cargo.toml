@@ -1,7 +1,7 @@
 [package]
 name = "rust-network-mgr"
 authors = ["sparesparrow"]
-version = "0.1.2"
+version = "0.1.4"
 edition = "2024"
 description = "Linux based network management, packet routing and LAN peers IP monitoring service"
 license-file = "LICENSE"
@@ -32,7 +32,8 @@ tokio = { version = "^1.32.0", features = ["full"] } # Async runtime
 serde = { version = "^1.0", features = ["derive"] }
 serde_yaml = "^0.9.25"       # For parsing YAML configuration files
 
-nftnl = "^0.7.0"             # Low-level Netlink bindings specifically for nf_tables (Updated)
+# Remove explicit features again, rely on dep:nftnl in [features] table
+nftnl = { version = "^0.7.0"} # Use latest published version
 
 # Error handling and logging
 thiserror = "^1.0.48"
@@ -43,6 +44,10 @@ tracing-subscriber = { version = "^0.3.17", features = ["env-filter", "fmt"] } #
 directories = "^5.0" # Useful for finding runtime directories like /run
 anyhow = "^1.0" # General purpose error handling, useful alongside thiserror
 futures = "^0.3" # For stream handling with rtnetlink
-tempfile = "3.19.1"
+tempfile = "3.10.1" # Updated tempfile version
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# Add dev-dependencies for tests if necessary, e.g.:
+# [dev-dependencies]
+# rand = "0.8"

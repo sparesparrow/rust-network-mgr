@@ -2,6 +2,7 @@ use serde::Deserialize;
 use std::net::IpAddr;
 use thiserror::Error;
 use tokio::sync::mpsc; // For channels
+use nftnl; // Add use statement for nftnl
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -11,6 +12,8 @@ pub enum AppError {
     Network(#[from] rtnetlink::Error),
     #[error("NFTables error: {0}")]
     Nftables(String),
+    #[error("NFTables NFTNL error: {0}")]
+    Nftnl(#[from] nftnl::NetlinkError), // Revert to standard #[from] usage
     #[error("Socket error: {0}")]
     Socket(#[from] std::io::Error),
     #[error("Initialization error: {0}")]
