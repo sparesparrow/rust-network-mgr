@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use log::{info, warn};
 
-const DEFAULT_CONFIG_PATH: &str = "/etc/rust-network-manager/config.yaml";
+const DEFAULT_CONFIG_PATH: &str = "/etc/rust-network-mgr/config.yaml";
 const PKG_DEFAULT_CONFIG_PATH_FALLBACK: &str = "pkg-files/config/default.yaml";
 
 /// Gets the path to the default configuration file packaged with the application.

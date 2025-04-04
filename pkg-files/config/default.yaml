@@ -1,0 +1,10 @@
+interfaces:
+  - name: eth0 # Example interface, replace with actual
+    dhcp: true
+    nftables_zone: wan # Example zone, maps to 'wan_ips' set
+
+# Optional: Specify the path for the control socket
+# socket_path: /run/rust-network-mgr.sock
+
+# Optional: Specify a custom path for nftables rule scripts (not currently used)
+# nftables_rules_path: /etc/rust-network-mgr/rules.d 
