@@ -469,26 +469,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b15813163c1d831bf4a13c3610c05c0d03b39feb07f7e09fa234dac9b15aaf39"
 
 [[package]]
-name = "packet_route"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "directories",
- "futures",
- "netlink-packet-core",
- "netlink-packet-route",
- "nftnl",
- "nix 0.27.1",
- "rtnetlink",
- "serde",
- "serde_yaml",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "parking_lot"
 version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -633,6 +613,26 @@ dependencies = [
  "nix 0.29.0",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "rust-network-mgr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "directories",
+ "futures",
+ "netlink-packet-core",
+ "netlink-packet-route",
+ "nftnl",
+ "nix 0.27.1",
+ "rtnetlink",
+ "serde",
+ "serde_yaml",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

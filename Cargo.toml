@@ -1,27 +1,28 @@
 [package]
-name = "packet_route"
+name = "rust-network-mgr"
+authors = ["sparesparrow"]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+description = "Linux based network management, packet routing and LAN peers IP monitoring service"
+license = "MIT"
+license-file = "LICENSE"
+repository = "https://github.com/sparesparrow/rust-network-mgr"
+readme = "README.md"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# Network and system interaction
 rtnetlink = "0.16.0"        # Provides safe bindings for Linux Netlink (core for monitoring)
-# Add direct dependencies on the underlying netlink crates needed for type imports
 netlink-packet-core = "^0.7.0"  # Core netlink packet definitions
 netlink-packet-route = "^0.22.0" # Route-specific netlink packet definitions (Align with rtnetlink 0.16.0)
+
 nix = { version = "^0.27.1", features = ["net"] } # Added "net" feature for socket options if needed later
 tokio = { version = "^1.32.0", features = ["full"] } # Async runtime
 
-# Configuration
 serde = { version = "^1.0", features = ["derive"] }
 serde_yaml = "^0.9.25"       # For parsing YAML configuration files
 
-# NFTables interaction
 nftnl = "^0.7.0"             # Low-level Netlink bindings specifically for nf_tables (Updated)
 
-# OR consider executing `nft` CLI as a simpler alternative initially
 # Error handling and logging
 thiserror = "^1.0.48"
 tracing = "^0.1.37"
@@ -31,3 +32,5 @@ tracing-subscriber = { version = "^0.3.17", features = ["env-filter", "fmt"] } #
 directories = "^5.0" # Useful for finding runtime directories like /run
 anyhow = "^1.0" # General purpose error handling, useful alongside thiserror
 futures = "^0.3" # For stream handling with rtnetlink
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
