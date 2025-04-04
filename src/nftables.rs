@@ -73,7 +73,7 @@ impl NftablesManager {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::types::{AppConfig, InterfaceConfig, NetworkState};
     use std::collections::HashMap;

@@ -1,15 +1,12 @@
-mod config;
-mod network;
-mod nftables;
-mod socket;
-mod types;
+// Use the library crate
+use rust_network_mgr::config::{load_config, validate_config};
+use rust_network_mgr::network::NetworkMonitor;
+use rust_network_mgr::nftables::NftablesManager;
+use rust_network_mgr::socket::SocketHandler;
+use rust_network_mgr::types::{AppConfig, AppError, ControlCommand, NetworkEvent, NetworkState, Result};
 
-use crate::config::{load_config, validate_config};
-use crate::network::NetworkMonitor;
-use crate::nftables::NftablesManager;
-use crate::socket::SocketHandler;
-use crate::types::{AppConfig, AppError, ControlCommand, NetworkEvent, NetworkState, Result};
-
+use std::collections::HashMap; // Keep this if AppState uses it directly
+use std::net::IpAddr; // Keep this if handle_network_event uses it directly
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -212,13 +209,14 @@ fn handle_network_event(state: &mut NetworkState, event: NetworkEvent) {
             }
         }
         NetworkEvent::IpRemoved(if_name, ip) => {
+             let if_name_clone = if_name.clone(); // Clone for logging
             if let Some(ips) = state.interface_ips.get_mut(&if_name) {
                 if let Some(pos) = ips.iter().position(|&x| x == ip) {
                     ips.remove(pos);
-                    tracing::debug!("State updated: Removed IP {} from {}", ip, if_name);
+                    tracing::debug!("State updated: Removed IP {} from {}", ip, &if_name_clone);
                     if ips.is_empty() {
-                        state.interface_ips.remove(&if_name);
-                        tracing::debug!("Removed interface {} from state as it has no IPs.", if_name);
+                        state.interface_ips.remove(&if_name_clone);
+                        tracing::debug!("Removed interface {} from state as it has no IPs.", if_name_clone);
                     }
                 }
             }

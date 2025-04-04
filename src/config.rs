@@ -1,9 +1,24 @@
 use crate::types::{AppConfig, AppError, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/rust-network-manager/config.yaml";
-const PKG_DEFAULT_CONFIG_PATH: &str = "pkg-files/config/default.yaml";
+const PKG_DEFAULT_CONFIG_PATH_FALLBACK: &str = "pkg-files/config/default.yaml";
+
+/// Gets the path to the default configuration file packaged with the application.
+/// In debug builds, it resolves relative to the Cargo manifest directory.
+/// In release builds, it uses a predefined path relative to the expected installation.
+fn get_pkg_default_config_path() -> PathBuf {
+    if cfg!(debug_assertions) {
+        // In debug builds, find it relative to the project root
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(PKG_DEFAULT_CONFIG_PATH_FALLBACK)
+    } else {
+        // In release builds, assume it's in a standard location relative
+        // to the binary or a system path. This might need adjustment based
+        // on the actual installation procedure.
+        PathBuf::from(PKG_DEFAULT_CONFIG_PATH_FALLBACK) // Or perhaps /usr/share/rust-network-manager/default.yaml?
+    }
+}
 
 /// Loads configuration from the specified path, or falls back to defaults.
 pub fn load_config(config_path_opt: Option<&Path>) -> Result<AppConfig> {
@@ -11,23 +26,26 @@ pub fn load_config(config_path_opt: Option<&Path>) -> Result<AppConfig> {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| Path::new(DEFAULT_CONFIG_PATH).to_path_buf());
 
-tracing::info!("Attempting to load configuration from: {:?}", config_path);
+    tracing::info!("Attempting to load configuration from: {:?}", config_path);
 
     let config_str = match fs::read_to_string(&config_path) {
         Ok(s) => s,
         Err(e) => {
+            let pkg_default_path = get_pkg_default_config_path();
             tracing::warn!(
-                "Failed to read config file {:?}: {}. Trying package default.",
+                "Failed to read config file {:?}: {}. Trying package default at {:?}.",
                 config_path,
-                e
+                e,
+                pkg_default_path
             );
-            // Fallback to reading the default config packaged with the application
-            fs::read_to_string(PKG_DEFAULT_CONFIG_PATH).map_err(|e| {
+
+            fs::read_to_string(&pkg_default_path).map_err(|e_fallback| {
                 AppError::Config(format!(
-                    "Failed to read both {:?} and {}: {}",
+                    "Failed to read both {:?} and {:?}: {} (fallback error: {})",
                     config_path,
-                    PKG_DEFAULT_CONFIG_PATH,
-                    e
+                    pkg_default_path,
+                    e,
+                    e_fallback
                 ))
             })?
         }
@@ -49,7 +67,7 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::types::InterfaceConfig;
     use std::io::Write;
@@ -83,8 +101,40 @@ socket_path: /tmp/test.sock
     }
 
     #[test]
+    fn test_load_fallback_config() {
+        // Ensure the test doesn't find a config at the non-existent path
+        let non_existent_path = Path::new("/tmp/non_existent_config_for_test.yaml");
+        let _ = std::fs::remove_file(&non_existent_path); // Clean up if it exists
+
+        // Create the fallback file temporarily (relative to manifest dir)
+        let fallback_path = get_pkg_default_config_path();
+        let fallback_dir = fallback_path.parent().unwrap();
+        std::fs::create_dir_all(fallback_dir).unwrap();
+        let fallback_yaml = r#"
+interfaces:
+  - name: "fallback0"
+    dhcp: true
+socket_path: "/tmp/fallback.sock"
+"#;
+        std::fs::write(&fallback_path, fallback_yaml).unwrap();
+
+        // Attempt to load using the non-existent path, expecting fallback
+        let config = load_config(Some(&non_existent_path)).unwrap();
+
+        // Verify fallback content is loaded
+        assert_eq!(config.interfaces.len(), 1);
+        assert_eq!(config.interfaces[0].name, "fallback0");
+        assert_eq!(config.socket_path, Some("/tmp/fallback.sock".to_string()));
+
+        // Clean up the temporary fallback file
+        let _ = std::fs::remove_file(&fallback_path);
+        let _ = std::fs::remove_dir(fallback_dir); // Remove dir only if empty
+    }
+
+    #[test]
     fn test_load_invalid_yaml() {
-        let yaml = "interfaces: [ name: eth0 ]"; // Invalid YAML
+        // Use YAML with definitively incorrect syntax (bad indentation)
+        let yaml = "interfaces:\n  - name: eth0\n invalid_indent: true"; 
         let mut file = NamedTempFile::new().unwrap();
         writeln!(file, "{}", yaml).unwrap();
 

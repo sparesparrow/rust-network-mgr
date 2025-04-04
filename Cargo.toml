@@ -1,14 +1,25 @@
 [package]
 name = "rust-network-mgr"
 authors = ["sparesparrow"]
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Linux based network management, packet routing and LAN peers IP monitoring service"
-license = "MIT"
 license-file = "LICENSE"
 repository = "https://github.com/sparesparrow/rust-network-mgr"
 readme = "README.md"
 
+[lib]
+name = "rust_network_mgr"           # The name of the target.
+path = "src/lib.rs"    # The source file of the target.
+test = true            # Is tested by default.
+doctest = true         # Documentation examples are tested by default.
+bench = true           # Is benchmarked by default.
+doc = true             # Is documented by default.
+proc-macro = false     # Set to `true` for a proc-macro library.
+harness = true         # Use libtest harness.
+edition = "2024"       # The edition of the target.
+crate-type = ["lib"]   # The crate types to generate.
+required-features = [] # Features required to build this target (N/A for lib).
 
 [dependencies]
 rtnetlink = "0.16.0"        # Provides safe bindings for Linux Netlink (core for monitoring)
@@ -32,5 +43,6 @@ tracing-subscriber = { version = "^0.3.17", features = ["env-filter", "fmt"] } #
 directories = "^5.0" # Useful for finding runtime directories like /run
 anyhow = "^1.0" # General purpose error handling, useful alongside thiserror
 futures = "^0.3" # For stream handling with rtnetlink
+tempfile = "3.19.1"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

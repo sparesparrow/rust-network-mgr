@@ -1,9 +1,4 @@
-// Import necessary types from your crate
-use packet_route::types::{AppConfig, ControlCommand, NetworkEvent, NetworkState};
-use packet_route::config; // Assuming config module is public or accessible
-use packet_route::network::NetworkMonitor;
-use packet_route::nftables::NftablesManager;
-use packet_route::socket::SocketHandler;
+use rust_network_mgr::{config, network::NetworkMonitor, nftables::NftablesManager, socket::SocketHandler, types::{ControlCommand, NetworkEvent}};
 
 use std::collections::HashMap;
 use std::io::Write;
