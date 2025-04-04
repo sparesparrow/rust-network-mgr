@@ -1,131 +1,220 @@
-use crate::types::{AppConfig, NetworkState, Result};
+//! NFTables management module using rustables crate
 
-/// Manages NFTables rules based on network state.
+use crate::types::{AppError, InterfaceConfig, NetworkState};
+use log::{debug, error, info};
+use rustables::{
+    Batch, MsgType, ProtocolFamily, Table,
+    set::SetBuilder,
+};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
+
+/// Manages nftables rules using the rustables crate
 pub struct NftablesManager {
-    config: AppConfig, // May need specific nftables config later
-    // Add state if needed, e.g., loaded templates
+    #[allow(dead_code)] // Allow config field to be unused for now
+    config: Arc<AsyncMutex<Vec<InterfaceConfig>>>,
+    table_name: String,
 }
 
 impl NftablesManager {
-    pub fn new(config: AppConfig) -> Self {
-        NftablesManager { config }
+    /// Create a new NftablesManager instance
+    pub async fn new(config: Arc<AsyncMutex<Vec<InterfaceConfig>>>) -> Result<Self, AppError> {
+        let manager = Self {
+            config,
+            table_name: "filter".to_string(),
+        };
+        Ok(manager)
     }
 
-    /// Loads rule templates or configurations.
-    /// Placeholder for now.
-    pub fn load_rules(&mut self) -> Result<()> {
-        tracing::info!(
-            "Loading NFTables rules (currently a placeholder) from path: {:?}",
-            self.config.nftables_rules_path
-        );
-        // TODO: Implement loading logic (e.g., read template files)
+    /// Ensures the base nftables structure exists (inet table)
+    pub async fn load_rules(&self) -> Result<(), AppError> {
+        info!("Ensuring base nftables structure exists");
+        let table = Table::new(ProtocolFamily::Inet).with_name(&self.table_name);
+        
+        let mut batch = Batch::new();
+        table.add_to_batch(&mut batch);
+        
+        // Send the batch to apply changes
+        batch.send().map_err(AppError::Nftables)?;
+        
+        info!("Base table 'inet filter' created or ensured.");
         Ok(())
     }
 
-    /// Applies NFTables rules based on the current network state.
-    /// Placeholder implementation - logs the intended action.
-    pub async fn apply_rules(&self, state: &NetworkState) -> Result<()> {
-        tracing::info!(
-            "Applying NFTables rules (placeholder) for state: {:?}",
-            state
-        );
-
-        // --- Placeholder Logic --- 
-        // In a real implementation:
-        // 1. Generate nftables rules based on `state` and `self.config`.
-        //    - Iterate through `state.interface_ips`.
-        //    - Find corresponding `InterfaceConfig` in `self.config.interfaces`.
-        //    - Use `nftables_zone` and IP addresses to generate rules (e.g., update sets).
-        // 2. Apply the rules atomically.
-        //    - Option A: Use `nftnl` library to construct and send Netlink messages.
-        //    - Option B: Generate an `nft` script and execute `nft -f /path/to/script`.
-
-        for (if_name, ips) in &state.interface_ips {
-             if let Some(if_config) = self.config.interfaces.iter().find(|i| &i.name == if_name) {
-                 if let Some(zone) = &if_config.nftables_zone {
-                    tracing::debug!(
-                        "Would update nftables set for zone '{}' on interface '{}' with IPs: {:?}",
-                        zone, if_name, ips
-                    );
-                    // Example using `nft` command (requires error handling and proper escaping):
-                    // let ip_list = ips.iter().map(|ip| ip.to_string()).collect::<Vec<_>>().join(", ");
-                    // let command = format!("nft add element inet filter {}_ips {{ {} }}", zone, ip_list);
-                    // tracing::debug!("Executing: {}", command);
-                    // let output = tokio::process::Command::new("nft")
-                    //     .arg(command)
-                    //     .output()
-                    //     .await
-                    //     .map_err(|e| AppError::Nftables(format!("Failed to execute nft: {}", e)))?;
-                    // if !output.status.success() {
-                    //     return Err(AppError::Nftables(format!(
-                    //         "nft command failed: {}\nStderr: {}",
-                    //         command,
-                    //         String::from_utf8_lossy(&output.stderr)
-                    //     )));
-                    // }
-                 }
-             }
+    /// Apply rules based on the current network state
+    pub async fn apply_rules(&self, network_state: &NetworkState) -> Result<(), AppError> {
+        info!("Applying nftables rules based on network state");
+        
+        // Create a batch for atomic operations
+        let mut batch = Batch::new();
+        
+        // Get zone IPs from network state directly
+        for (zone_name, ips) in &network_state.zone_ips {
+            debug!("Updating set for zone: {}", zone_name);
+            
+            // Create table reference
+            let table = Table::new(ProtocolFamily::Inet).with_name(&self.table_name);
+            
+            // Set name based on zone (e.g., "wan_ips", "lan_ips")
+            let set_name = format!("{}_ips", zone_name);
+            
+            // Process IPv4 and IPv6 addresses separately
+            // First handle IPv4 addresses
+            let ipv4_addresses: Vec<_> = ips.iter()
+                .filter_map(|ip| match ip {
+                    IpAddr::V4(ipv4) => Some(*ipv4),
+                    _ => None,
+                })
+                .collect();
+                
+            if !ipv4_addresses.is_empty() {
+                let mut set_builder = match SetBuilder::<Ipv4Addr>::new(&set_name, &table) {
+                    Ok(builder) => builder,
+                    Err(e) => {
+                        error!("Failed to create IPv4 set builder for {}: {}", set_name, e);
+                        return Err(AppError::Nftables(
+                            rustables::error::QueryError::BuilderError(e)
+                        ));
+                    }
+                };
+                
+                // Add IPs to the set
+                for ipv4 in &ipv4_addresses {
+                    set_builder.add(ipv4);
+                }
+                
+                // Finish building the set and add to batch
+                let (set, elements) = set_builder.finish();
+                
+                // Add the set to the batch (create/update)
+                batch.add(&set, MsgType::Add);
+                
+                // Add the elements to the batch
+                batch.add(&elements, MsgType::Add);
+            }
+            
+            // Handle IPv6 addresses if there are any
+            let ipv6_addresses: Vec<_> = ips.iter()
+                .filter_map(|ip| match ip {
+                    IpAddr::V6(ipv6) => Some(*ipv6),
+                    _ => None,
+                })
+                .collect();
+                
+            if !ipv6_addresses.is_empty() {
+                let set_name_v6 = format!("{}_ipv6", zone_name); // Use a different name for IPv6 sets
+                let mut set_builder = match SetBuilder::<Ipv6Addr>::new(&set_name_v6, &table) {
+                    Ok(builder) => builder,
+                    Err(e) => {
+                        error!("Failed to create IPv6 set builder for {}: {}", set_name_v6, e);
+                        return Err(AppError::Nftables(
+                            rustables::error::QueryError::BuilderError(e)
+                        ));
+                    }
+                };
+                
+                // Add IPs to the set
+                for ipv6 in &ipv6_addresses {
+                    set_builder.add(ipv6);
+                }
+                
+                // Finish building the set and add to batch
+                let (set, elements) = set_builder.finish();
+                
+                // Add the set to the batch (create/update)
+                batch.add(&set, MsgType::Add);
+                
+                // Add the elements to the batch
+                batch.add(&elements, MsgType::Add);
+            }
         }
-
-        tracing::warn!("NFTables rule application is currently a placeholder.");
+        
+        // Send the batch to apply changes atomically
+        batch.send().map_err(AppError::Nftables)?;
+        
+        info!("Successfully applied nftables rules");
         Ok(())
     }
 }
 
+// Note: ip_to_expr helper is no longer needed as conversion happens inline.
+
 #[cfg(test)]
-pub mod tests {
+mod tests {
     use super::*;
-    use crate::types::{AppConfig, InterfaceConfig, NetworkState};
-    use std::collections::HashMap;
-    use std::net::IpAddr;
+    use crate::types::InterfaceConfig; // Make sure this is imported for the test mock
+    use std::net::Ipv4Addr;
+    use std::sync::Arc;
+    use tokio::runtime::Runtime;
+    use tokio::sync::Mutex as AsyncMutex;
 
-    fn create_test_config() -> AppConfig {
-        AppConfig {
-            interfaces: vec![
-                InterfaceConfig {
-                    name: "eth0".to_string(),
-                    dhcp: Some(true),
-                    address: None,
-                    nftables_zone: Some("wan".to_string()),
-                },
-                InterfaceConfig {
-                    name: "eth1".to_string(),
-                    dhcp: None,
-                    address: Some("192.168.1.1/24".to_string()),
-                    nftables_zone: Some("lan".to_string()),
-                },
-            ],
-            socket_path: None,
-            nftables_rules_path: Some("/tmp/nft_rules".to_string()),
-        }
+    // Mock config now uses Vec<InterfaceConfig>
+    fn create_mock_config() -> Arc<AsyncMutex<Vec<InterfaceConfig>>> {
+        Arc::new(AsyncMutex::new(vec![
+            InterfaceConfig {
+                name: "eth0".to_string(),
+                dhcp: Some(true),
+                address: None,
+                nftables_zone: Some("wan".to_string()),
+            },
+            InterfaceConfig {
+                name: "eth1".to_string(),
+                dhcp: None,
+                address: Some("192.168.1.1/24".to_string()),
+                nftables_zone: Some("lan".to_string()),
+            },
+        ]))
     }
 
-    #[tokio::test]
-    async fn test_apply_rules_placeholder() {
-        let config = create_test_config();
-        let manager = NftablesManager::new(config);
+    fn create_test_network_state() -> NetworkState {
         let mut state = NetworkState::new();
-        state.interface_ips.insert(
-            "eth0".to_string(),
-            vec!["1.1.1.1".parse::<IpAddr>().unwrap()],
-        );
-         state.interface_ips.insert(
-            "eth1".to_string(),
-            vec!["192.168.1.5".parse::<IpAddr>().unwrap(), "fe80::1".parse::<IpAddr>().unwrap()],
-        );
-
-        // This just checks that the placeholder function runs without panic
-        let result = manager.apply_rules(&state).await;
-        assert!(result.is_ok());
+        let wan_ips = vec![
+            IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)),
+            IpAddr::V4(Ipv4Addr::new(5, 6, 7, 8)),
+        ];
+        state.zone_ips.insert("wan".to_string(), wan_ips);
+        let lan_ips = vec![IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))]; // Example LAN IP
+        state.zone_ips.insert("lan".to_string(), lan_ips);
+        state
     }
 
-     #[tokio::test]
-    async fn test_load_rules_placeholder() {
-        let config = create_test_config();
-        let mut manager = NftablesManager::new(config);
+    #[test]
+    #[ignore] // Requires root privileges
+    fn test_nftables_manager_init() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let config = create_mock_config();
+            let manager_result = NftablesManager::new(config).await;
+            assert!(manager_result.is_ok(), "NftablesManager::new should succeed: {:?}", manager_result.err());
+        });
+    }
 
-        // This just checks that the placeholder function runs without panic
-        let result = manager.load_rules();
-        assert!(result.is_ok());
+    #[test]
+    #[ignore] // Requires root privileges and nftables installed
+    fn test_nftables_table_creation() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let config = create_mock_config();
+            let manager = NftablesManager::new(config).await.expect("Failed to create NftablesManager");
+            let result = manager.load_rules().await;
+            assert!(result.is_ok(), "load_rules should succeed: {:?}", result.err());
+        });
+    }
+
+    #[test]
+    #[ignore] // Requires root privileges and nftables installed
+    fn test_nftables_set_management() {
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let config = create_mock_config();
+            let manager = NftablesManager::new(config).await.expect("Failed to create NftablesManager");
+            let result = manager.load_rules().await;
+            assert!(result.is_ok(), "load_rules should succeed: {:?}", result.err());
+
+            let network_state = create_test_network_state();
+            let apply_result = manager.apply_rules(&network_state).await;
+            assert!(apply_result.is_ok(), "apply_rules should succeed: {:?}", apply_result.err());
+        });
     }
 }

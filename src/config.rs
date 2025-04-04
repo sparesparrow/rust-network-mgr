@@ -69,7 +69,6 @@ pub fn validate_config(config: &AppConfig) -> Result<()> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
-    use crate::types::InterfaceConfig;
     use std::io::Write;
     use tempfile::NamedTempFile;
 

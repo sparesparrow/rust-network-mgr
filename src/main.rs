@@ -3,14 +3,15 @@ use rust_network_mgr::config::{load_config, validate_config};
 use rust_network_mgr::network::NetworkMonitor;
 use rust_network_mgr::nftables::NftablesManager;
 use rust_network_mgr::socket::SocketHandler;
-use rust_network_mgr::types::{AppConfig, AppError, ControlCommand, NetworkEvent, NetworkState, Result};
+use rust_network_mgr::types::{AppConfig, AppError, ControlCommand, NetworkEvent, Result, InterfaceConfig, AppState};
 
 use std::collections::HashMap; // Keep this if AppState uses it directly
-use std::net::IpAddr; // Keep this if handle_network_event uses it directly
-use std::path::Path;
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::signal::unix::{signal, SignalKind};
+use log::{info, error}; // Removed warn
+use tracing; // Assuming tracing is used
 
 // Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 100;
@@ -18,208 +19,205 @@ const COMMAND_CHANNEL_SIZE: usize = 10;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    // Basic logging setup (consider a more robust solution like tracing-subscriber)
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    info!("Starting rust-network-mgr...");
 
-    tracing::info!("Starting Rust Network Manager...");
+    let initial_config = load_initial_config()?;
 
-    // --- Initialization ---
-    let app_state = Arc::new(Mutex::new(AppState::new()));
-    let initial_config = load_initial_config(None)?; // Load initial config (can take path arg later)
-
-    // Create communication channels
     let (network_tx, mut network_rx) = mpsc::channel::<NetworkEvent>(EVENT_CHANNEL_SIZE);
     let (control_tx, mut control_rx) = mpsc::channel::<ControlCommand>(COMMAND_CHANNEL_SIZE);
 
     // Create and initialize components
-    let network_monitor = NetworkMonitor::new(network_tx);
-    let mut nftables_manager = NftablesManager::new(initial_config.clone());
+    // Assume NetworkMonitor::new returns Self directly now based on test errors
+    let network_monitor = NetworkMonitor::new(network_tx.clone());
+
+    let interface_config_arc = Arc::new(Mutex::new(initial_config.interfaces.clone()));
+    let nftables_manager = Arc::new(NftablesManager::new(interface_config_arc.clone()).await?);
     let socket_handler = SocketHandler::new(initial_config.socket_path.as_deref(), control_tx.clone()).await?;
+    let initial_state = AppState::new(initial_config.clone()); 
+    let app_state = Arc::new(Mutex::new(initial_state));
 
-    // Load initial NFT rules (placeholder)
-    nftables_manager.load_rules()?;
-
-    // Apply initial rules based on potentially empty state (or state from monitor startup)
-    // Note: NetworkMonitor populates its internal state first.
-    // A more robust approach might involve getting initial state from monitor *before* starting its event loop.
-    { 
-        let state = app_state.lock().await.network_state.clone();
-        nftables_manager.apply_rules(&state).await.map_err(|e| {
-            tracing::error!("Failed to apply initial NFTables rules: {}", e);
-            AppError::Nftables(format!("Initial apply failed: {}", e))
-        })?;
+    // Load initial NFT rules
+    info!("Loading initial nftables rules...");
+    if let Err(e) = nftables_manager.load_rules().await {
+        error!("Failed to load initial nftables rules: {}", e);
+        // Consider if this is fatal
     }
-    tracing::info!("Initial setup complete.");
 
-    // --- Spawn Tasks ---
+    // Apply initial rules based on current (empty) state if needed
+    {
+        let state_guard = app_state.lock().await;
+        info!("Applying initial nftables rules based on state: {:?}", state_guard.network_state);
+        if let Err(e) = nftables_manager.apply_rules(&state_guard.network_state).await {
+            error!("Failed to apply initial nftables rules: {}", e);
+            // Consider if fatal
+        }
+    }
+
+    // Start tasks
+    info!("Starting network monitor...");
     let monitor_handle = tokio::spawn(async move {
         if let Err(e) = network_monitor.start().await {
-            tracing::error!("Network monitor failed: {}", e);
+            error!("Network monitor failed: {}", e);
         }
-        tracing::info!("Network monitor task finished.");
     });
 
+    info!("Starting socket handler...");
     let socket_handle = tokio::spawn(async move {
+        // Call start directly, assuming it handles errors internally or returns ()
         socket_handler.start().await;
-        tracing::info!("Socket handler task finished.");
+        info!("Socket handler task finished (assuming clean exit or internal error handling).");
     });
 
-    // --- Signal Handling ---
-    let mut sigint = signal(SignalKind::interrupt())?;
-    let mut sigterm = signal(SignalKind::terminate())?;
+    info!("Application initialized successfully. Waiting for events...");
 
-    // --- Main Event Loop ---
-    tracing::info!("Entering main event loop...");
+    // Setup signal handling for graceful shutdown
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
+
     loop {
         tokio::select! {
-            // Listen for network events
             Some(event) = network_rx.recv() => {
-                tracing::debug!("Received network event: {:?}", event);
-                let mut state_guard = app_state.lock().await;
-                handle_network_event(&mut state_guard.network_state, event);
-                // Clone the necessary parts for apply_rules
-                let current_state = state_guard.network_state.clone();
-                drop(state_guard); // Release lock before await
-
-                if let Err(e) = nftables_manager.apply_rules(&current_state).await {
-                    tracing::error!("Failed to apply NFTables rules after network event: {}", e);
-                    // Decide on error strategy: continue, retry, shutdown?
-                }
+                info!("Received network event: {:?}", event);
+                // Spawn a task to handle the network event asynchronously
+                let state_clone = app_state.clone();
+                let nft_manager_clone = nftables_manager.clone(); // Clone Arc
+                let config_clone = interface_config_arc.clone(); // Clone Arc
+                tokio::spawn(async move {
+                    handle_network_event(event, nft_manager_clone, state_clone, config_clone).await;
+                });
             }
-
-            // Listen for control commands
             Some(command) = control_rx.recv() => {
-                tracing::info!("Received control command: {:?}", command);
+                info!("Received control command: {:?}", command);
                 match command {
                     ControlCommand::Reload => {
-                        tracing::info!("Reload command received. Reloading configuration...");
-                         match load_initial_config(None) { // Replace None with path if needed
-                             Ok(new_config) => {
-                                 nftables_manager = NftablesManager::new(new_config);
-                                 if let Err(e) = nftables_manager.load_rules() {
-                                     tracing::error!("Failed to load NFTables rules during reload: {}", e);
-                                     // Potentially revert to old config or state?
-                                 } else {
-                                     // Re-apply rules with current state and new config
-                                     let state_guard = app_state.lock().await;
-                                     let current_state = state_guard.network_state.clone();
-                                     drop(state_guard);
-                                     if let Err(e) = nftables_manager.apply_rules(&current_state).await {
-                                         tracing::error!("Failed to apply NFTables rules after reload: {}", e);
-                                     }
-                                      tracing::info!("Reload complete.");
-                                 }
-                             }
-                             Err(e) => {
-                                 tracing::error!("Failed to reload configuration: {}", e);
-                                 // Keep using the old configuration
-                             }
-                         }
+                        info!("Reload command received. Reloading configuration...");
+                        match load_config(None) { // Assuming None uses default path
+                            Ok(new_config) => {
+                                let mut state = app_state.lock().await;
+                                state.config = new_config.clone(); // Update config in state
+                                *interface_config_arc.lock().await = new_config.interfaces; // Update Arc for nftables
+                                info!("Configuration reloaded.");
+                                // Optionally re-apply rules based on new config/state
+                                if let Err(e) = nftables_manager.apply_rules(&state.network_state).await {
+                                    error!("Failed to apply rules after reload: {}", e);
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to reload configuration: {}", e);
+                            }
+                        }
                     }
                     ControlCommand::Status => {
-                        let state_guard = app_state.lock().await;
-                        tracing::info!("Current Network State: {:?}", state_guard.network_state);
-                        // TODO: Could send status back via the socket connection if needed (more complex)
+                        let state = app_state.lock().await;
+                        info!("Current Status: Network State: {:?}, Config: {:?}", state.network_state, state.config);
+                        // Respond via socket if needed
                     }
                     ControlCommand::Ping => {
-                        // Handled mostly by socket handler, just log here
-                        tracing::debug!("Ping command processed.");
+                         info!("Ping received");
+                         // Respond via socket
                     }
                     ControlCommand::Shutdown => {
-                        tracing::info!("Shutdown command received. Initiating graceful shutdown...");
-                        break; // Exit the main loop
+                        info!("Shutdown command received. Initiating graceful shutdown...");
+                        break; // Exit the loop
                     }
                 }
             }
-
-            // Listen for termination signals
-            _ = sigint.recv() => {
-                tracing::info!("Received SIGINT. Initiating graceful shutdown...");
-                 // Send shutdown command to self to trigger cleanup
-                 if let Err(e) = control_tx.send(ControlCommand::Shutdown).await {
-                     tracing::error!("Failed to send shutdown command internally: {}", e);
-                     break; // Force break if channel fails
-                 }
-            }
             _ = sigterm.recv() => {
-                tracing::info!("Received SIGTERM. Initiating graceful shutdown...");
-                 // Send shutdown command to self
-                 if let Err(e) = control_tx.send(ControlCommand::Shutdown).await {
-                     tracing::error!("Failed to send shutdown command internally: {}", e);
-                     break; // Force break if channel fails
-                 }
+                info!("Received SIGTERM. Initiating graceful shutdown...");
+                break;
             }
-
-            else => {
-                tracing::info!("All channels closed or signal handlers errored. Shutting down.");
+            _ = sigint.recv() => {
+                info!("Received SIGINT. Initiating graceful shutdown...");
                 break;
             }
         }
     }
 
-    // --- Cleanup --- (Optional: wait for tasks to finish)
-    tracing::info!("Shutting down tasks...");
-    // monitor_handle.abort(); // Or use a dedicated shutdown signal
-    // socket_handle.abort();
-    // Add graceful shutdown for tasks if needed
-     if let Err(e) = monitor_handle.await {
-        tracing::error!("Error joining monitor task: {:?}", e);
-    }
-     if let Err(e) = socket_handle.await {
-        tracing::error!("Error joining socket task: {:?}", e);
-    }
+    info!("Shutting down gracefully...");
+    // Add any cleanup logic here (e.g., stopping tasks, cleaning up resources)
+    monitor_handle.abort();
+    socket_handle.abort();
+    info!("Shutdown complete.");
 
-    tracing::info!("Rust Network Manager shut down gracefully.");
     Ok(())
 }
 
-/// Loads and validates the initial configuration.
-fn load_initial_config(path: Option<&Path>) -> Result<AppConfig> {
-    let config = load_config(path)?;
-    validate_config(&config)?;
-    tracing::info!("Configuration loaded and validated successfully.");
+fn load_initial_config() -> Result<AppConfig> {
+    let config = load_config(None).map_err(|e| AppError::Config(e.to_string()))?;
+    validate_config(&config).map_err(|e| AppError::Config(e.to_string()))?; // Use imported validate_config
     Ok(config)
 }
 
-/// Represents the shared state of the application.
-pub struct AppState {
-    network_state: NetworkState,
-    // Potentially add config here if it needs to be mutable and shared
-}
-
-impl AppState {
-    fn new() -> Self {
-        AppState {
-            network_state: NetworkState::new(),
-        }
-    }
-}
-
 /// Updates the network state based on an event.
-fn handle_network_event(state: &mut NetworkState, event: NetworkEvent) {
-    match event {
+async fn handle_network_event(
+    event: NetworkEvent,
+    nft_manager: Arc<NftablesManager>,
+    shared_state: Arc<Mutex<AppState>>,
+    _config: Arc<Mutex<Vec<InterfaceConfig>>> // Prefix unused parameter
+) {
+    tracing::debug!("Handling network event: {:?}", event);
+    let mut state_guard = shared_state.lock().await;
+    let if_name_for_removal: Option<String> = match event {
         NetworkEvent::IpAdded(if_name, ip) => {
-            let if_name_clone = if_name.clone(); // Clone before moving into entry()
-            let ips = state.interface_ips.entry(if_name).or_default();
+            let ips = state_guard.network_state.interface_ips.entry(if_name.clone()).or_default();
             if !ips.contains(&ip) {
                 ips.push(ip);
-                tracing::debug!("State updated: Added IP {} to {}", ip, if_name_clone);
+                tracing::debug!("State updated: Added IP {} to {}", ip, if_name);
             }
+            None // No interface to remove
         }
         NetworkEvent::IpRemoved(if_name, ip) => {
-             let if_name_clone = if_name.clone(); // Clone for logging
-            if let Some(ips) = state.interface_ips.get_mut(&if_name) {
+            let mut should_remove_entry = false;
+            if let Some(ips) = state_guard.network_state.interface_ips.get_mut(&if_name) {
                 if let Some(pos) = ips.iter().position(|&x| x == ip) {
                     ips.remove(pos);
-                    tracing::debug!("State updated: Removed IP {} from {}", ip, &if_name_clone);
+                    tracing::debug!("State updated: Removed IP {} from {}", ip, if_name);
                     if ips.is_empty() {
-                        state.interface_ips.remove(&if_name_clone);
-                        tracing::debug!("Removed interface {} from state as it has no IPs.", if_name_clone);
+                        should_remove_entry = true;
                     }
                 }
             }
+            if should_remove_entry {
+                Some(if_name) // Return the name to remove after the borrow
+            } else {
+                None
+            }
         }
+    };
+
+    // Remove the interface entry outside the main borrow if necessary
+    if let Some(if_name_to_remove) = if_name_for_removal {
+        state_guard.network_state.interface_ips.remove(&if_name_to_remove);
+        tracing::debug!("Removed interface {} from state as it has no IPs.", if_name_to_remove);
+    }
+
+    // Recalculate zone IPs based on the updated interface IPs
+    let mut new_zone_ips: HashMap<String, Vec<IpAddr>> = HashMap::new();
+    let locked_config = _config.lock().await; // Lock config needed for zone mapping
+    for iface_config in locked_config.iter() {
+        if let Some(zone) = &iface_config.nftables_zone {
+            if let Some(ips) = state_guard.network_state.interface_ips.get(&iface_config.name) {
+                 let zone_ips_entry = new_zone_ips.entry(zone.clone()).or_default();
+                 for ip in ips {
+                     if !zone_ips_entry.contains(ip) {
+                         zone_ips_entry.push(*ip);
+                     }
+                 }
+            }
+        }
+    }
+    state_guard.network_state.zone_ips = new_zone_ips;
+
+    // Clone the relevant state *before* dropping the lock
+    let current_network_state = state_guard.network_state.clone();
+    drop(state_guard); // Drop the lock before await
+
+    // Apply nftables rules based on the updated state
+    tracing::debug!("Applying NFT rules for state: {:?}", current_network_state);
+    if let Err(e) = nft_manager.apply_rules(&current_network_state).await {
+        error!("Failed to apply nftables rules after IP update: {}", e);
+        // Handle error appropriately
     }
 }

@@ -1,12 +1,14 @@
 [package]
 name = "rust-network-mgr"
 authors = ["sparesparrow"]
-version = "0.1.4"
+version = "0.1.6"
 edition = "2024"
 description = "Linux based network management, packet routing and LAN peers IP monitoring service"
 license-file = "LICENSE"
 repository = "https://github.com/sparesparrow/rust-network-mgr"
 readme = "README.md"
+keywords = ["network", "nftables", "netlink", "firewall", "manager"]
+categories = ["network-programming", "os::linux-apis"]
 
 [lib]
 name = "rust_network_mgr"           # The name of the target.
@@ -31,9 +33,10 @@ tokio = { version = "^1.32.0", features = ["full"] } # Async runtime
 
 serde = { version = "^1.0", features = ["derive"] }
 serde_yaml = "^0.9.25"       # For parsing YAML configuration files
+serde_json = "^1.0"        # ADDED: For debug printing in nftables.rs
 
 # Remove explicit features again, rely on dep:nftnl in [features] table
-nftnl = { version = "^0.7.0"} # Use latest published version
+# nftnl = { version = "^0.7.0"} # REMOVED: No longer using direct nftnl bindings
 
 # Error handling and logging
 thiserror = "^1.0.48"
@@ -44,10 +47,16 @@ tracing-subscriber = { version = "^0.3.17", features = ["env-filter", "fmt"] } #
 directories = "^5.0" # Useful for finding runtime directories like /run
 anyhow = "^1.0" # General purpose error handling, useful alongside thiserror
 futures = "^0.3" # For stream handling with rtnetlink
+futures-util = "0.3"
 tempfile = "3.10.1" # Updated tempfile version
+rustables = "0.8.6"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 # Add dev-dependencies for tests if necessary, e.g.:
 # [dev-dependencies]
 # rand = "0.8"
+
+log = "0.4"
+
+env_logger = "0.10" # Or latest compatible version
