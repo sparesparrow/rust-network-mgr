@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "network-mgr": {
+      "command": "rust-network-mgr-mcp",
+      "args": ["--api-url", "http://127.0.0.1:9100"]
+    }
+  }
+}

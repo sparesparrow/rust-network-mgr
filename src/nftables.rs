@@ -55,8 +55,10 @@ impl NftablesManager {
         // Drop the lock explicitly after use
         drop(config_lock);
 
-        // 3. Ensure Sets Exist for each unique zone
-        for zone_name in unique_zones {
+        // 3. Ensure Sets Exist for each unique zone, plus the built-in "docker" zone
+        let mut all_zones = unique_zones;
+        all_zones.insert("docker".to_string());
+        for zone_name in all_zones {
             // --- IPv4 Set Definition ---
             let ipv4_set_name = format!("{}_ips", zone_name);
             batch.add(NfListObject::Set(Box::new(Set {
@@ -103,28 +105,39 @@ impl NftablesManager {
         Ok(())
     }
 
-    /// Apply rules based on the current network state
-    pub async fn apply_rules(&self, network_state: &NetworkState) -> Result<(), AppError> {
+    /// Apply rules based on the current network state and tracked container IPs.
+    ///
+    /// Container IPs are collected into a dedicated `docker_ips` / `docker_ipv6` set.
+    /// Passing an empty map disables docker set population without error.
+    pub async fn apply_rules(
+        &self,
+        network_state: &NetworkState,
+        container_ips: &HashMap<String, IpAddr>,
+    ) -> Result<(), AppError> {
          info!("[NFTABLES-RS] Applying nftables rules (flush and add elements)");
 
          // Calculate zone_to_ips based on current network state and config
          let config_lock = self.config.lock().await;
          let mut zone_to_ips: HashMap<String, HashSet<IpAddr>> = HashMap::new();
-         // Correct access to network_state fields
-         // No need for another lock if network_state is &NetworkState
          for interface_config in config_lock.iter() {
              if let Some(zone) = &interface_config.nftables_zone {
-                 // Access interface_ips directly on network_state
                  if let Some(ips) = network_state.interface_ips.get(&interface_config.name) {
                      let zone_ips = zone_to_ips.entry(zone.clone()).or_default();
                      for ip in ips {
-                         zone_ips.insert(*ip); // Insert directly into HashSet
+                         zone_ips.insert(*ip);
                      }
                  }
              }
          }
-         // Drop lock
          drop(config_lock);
+
+         // Merge container IPs into the reserved "docker" zone
+         if !container_ips.is_empty() {
+             let docker_zone = zone_to_ips.entry("docker".to_string()).or_default();
+             for ip in container_ips.values() {
+                 docker_zone.insert(*ip);
+             }
+         }
 
 
          // --- Flushing Phase --- Execute Flush commands directly
@@ -328,7 +341,7 @@ mod tests {
             // Create the state within the shared structure for the test
             let network_state = create_test_network_state();
             // Need to pass the NetworkState struct directly
-            let apply_result = manager.apply_rules(&network_state).await;
+            let apply_result = manager.apply_rules(&network_state, &HashMap::new()).await;
             assert!(apply_result.is_ok(), "apply_rules should succeed: {:?}", apply_result.err());
         });
     }

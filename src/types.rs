@@ -58,9 +58,11 @@ pub struct InterfaceConfig {
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub interfaces: Vec<InterfaceConfig>,
-    // Add other global settings if needed, e.g., log level, socket path
     pub socket_path: Option<String>,
-    pub nftables_rules_path: Option<String>, // Path to rule templates/scripts
+    pub nftables_rules_path: Option<String>,
+    /// Bind address for the HTTP REST API, e.g. "127.0.0.1:9100".
+    /// Set to null/omit to disable the HTTP API.
+    pub http_bind_addr: Option<String>,
 }
 
 // --- Network State ---

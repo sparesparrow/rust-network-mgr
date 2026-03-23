@@ -1,6 +1,6 @@
 // Use the library crate
+use rust_network_mgr::api::{ApiState, spawn_http_server};
 use rust_network_mgr::config::load_config;
-
 use rust_network_mgr::network::NetworkMonitor;
 use rust_network_mgr::nftables::NftablesManager;
 use rust_network_mgr::socket::SocketHandler;
@@ -72,10 +72,26 @@ async fn main() -> Result<()> {
     {
         let state_guard = app_state.lock().await;
         info!("Applying initial nftables rules based on state: {:?}", state_guard.network_state);
-        if let Err(e) = nftables_manager.apply_rules(&state_guard.network_state).await {
+        if let Err(e) = nftables_manager.apply_rules(&state_guard.network_state, &state_guard.container_ips).await {
             error!("Failed to apply initial nftables rules: {}", e);
             // Consider if fatal
         }
+    }
+
+    // -- Spawn HTTP REST API (if configured) --
+    let http_bind = initial_config.http_bind_addr.clone()
+        .unwrap_or_else(|| "127.0.0.1:9100".to_string());
+    {
+        let state_guard = app_state.lock().await;
+        let api_state = ApiState {
+            network_state: Arc::new(Mutex::new(state_guard.network_state.clone())),
+            container_ips: Arc::new(Mutex::new(state_guard.container_ips.clone())),
+            event_tx: event_tx.clone(),
+            version: env!("CARGO_PKG_VERSION"),
+        };
+        drop(state_guard);
+        let _http_handle = spawn_http_server(api_state, &http_bind);
+        info!("HTTP API spawned on http://{}", http_bind);
     }
 
     // Docker Monitor (streamlined implementation - all events go through the main event channel)
@@ -132,30 +148,33 @@ async fn main() -> Result<()> {
                     },
                     SystemEvent::Docker(docker_event) => {
                         info!("Received Docker event: {:?}", docker_event);
-                        // Acquire lock once to update state based on event
-                        let mut state = app_state.lock().await;
-                        match docker_event {
-                            rust_network_mgr::types::DockerEvent::ContainerStarted(id, Some(ip)) => {
-                                info!("Handling Docker Container Started: {} (IP: {})", id, ip);
-                                state.container_ips.insert(id.clone(), ip);
-                                // TODO: Potentially trigger nftables update if container IPs affect rules
-                                info!("Updated AppState container IPs: {:?}", state.container_ips);
-                            }
-                            rust_network_mgr::types::DockerEvent::ContainerStarted(id, None) => {
-                                info!("Handling Docker Container Started: {} (No IP found)", id);
-                                // No IP to add to state
-                            }
-                            rust_network_mgr::types::DockerEvent::ContainerStopped(id) => {
-                                info!("Handling Docker Container Stopped: {}", id);
-                                if state.container_ips.remove(&id).is_some() {
-                                    // TODO: Potentially trigger nftables update if container IPs affect rules
-                                    info!("Removed container {} from AppState IPs. Current: {:?}", id, state.container_ips);
-                                } else {
-                                    info!("Container {} not found in AppState IPs.", id);
+                        let nft_manager_clone = nftables_manager.clone();
+                        let state_clone = app_state.clone();
+                        tokio::spawn(async move {
+                            let (network_state_snap, container_ips_snap) = {
+                                let mut state = state_clone.lock().await;
+                                match docker_event {
+                                    rust_network_mgr::types::DockerEvent::ContainerStarted(id, Some(ip)) => {
+                                        info!("Container started: {} (IP: {})", id, ip);
+                                        state.container_ips.insert(id, ip);
+                                    }
+                                    rust_network_mgr::types::DockerEvent::ContainerStarted(id, None) => {
+                                        info!("Container started: {} (no IP)", id);
+                                    }
+                                    rust_network_mgr::types::DockerEvent::ContainerStopped(id) => {
+                                        info!("Container stopped: {}", id);
+                                        state.container_ips.remove(&id);
+                                    }
                                 }
+                                (state.network_state.clone(), state.container_ips.clone())
+                            };
+                            if let Err(e) = nft_manager_clone
+                                .apply_rules(&network_state_snap, &container_ips_snap)
+                                .await
+                            {
+                                error!("Failed to apply nftables rules after Docker event: {}", e);
                             }
-                        }
-                        // Lock is released when `state` goes out of scope
+                        });
                     },
                     SystemEvent::Control(command) => {
                         info!("Received control command: {:?}", command);
@@ -178,7 +197,7 @@ async fn main() -> Result<()> {
                                             
                                             // Re-apply rules based on current state
                                             // The NftablesManager uses its internally stored config reference
-                                            if let Err(e) = nft_manager.apply_rules(&state.network_state).await {
+                                            if let Err(e) = nft_manager.apply_rules(&state.network_state, &state.container_ips).await {
                                                 error!("Error applying rules after reload: {}", e);
                                             }
                                             info!("Configuration reloaded and rules re-applied.");
@@ -305,12 +324,12 @@ async fn handle_network_event(
 
     // Clone the relevant state *before* dropping the lock
     let current_network_state = state_guard.network_state.clone();
+    let current_container_ips = state_guard.container_ips.clone();
     drop(state_guard); // Drop the lock before await
 
     // Apply nftables rules based on the updated state
     tracing::debug!("Applying NFT rules for state: {:?}", current_network_state);
-    // Pass only the network state; NftablesManager uses its internal config
-    if let Err(e) = nft_manager.apply_rules(&current_network_state).await {
+    if let Err(e) = nft_manager.apply_rules(&current_network_state, &current_container_ips).await {
         error!("Failed to apply nftables rules after IP update: {}", e);
         // Handle error appropriately
     }

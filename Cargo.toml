@@ -2,7 +2,7 @@
 name = "rust-network-mgr"
 authors = ["sparesparrow"]
 version = "0.1.8"
-edition = "2024"
+edition = "2021"
 description = "Linux based network management, packet routing and LAN peers IP monitoring service"
 license-file = "LICENSE"
 repository = "https://github.com/sparesparrow/rust-network-mgr"
@@ -19,7 +19,7 @@ bench = true           # Is benchmarked by default.
 doc = true             # Is documented by default.
 proc-macro = false     # Set to `true` for a proc-macro library.
 harness = true         # Use libtest harness.
-edition = "2024"       # The edition of the target.
+edition = "2021"       # The edition of the target.
 crate-type = ["lib"]   # The crate types to generate.
 required-features = [] # Features required to build this target (N/A for lib).
 
@@ -60,6 +60,28 @@ nftables = "0.6" # Using the JSON API crate
 # rand = "0.8"
 
 log = "0.4"
-
-env_logger = "0.10" # Or latest compatible version
+env_logger = "0.10"
 rustable = "0.3.0"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# HTTP REST API
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors"] }
+
+# Prometheus metrics
+prometheus-client = "0.22"
+
+# Lightweight blocking HTTP client (used by the MCP server binary)
+ureq = { version = "2", features = ["json"] }
+
+[[bin]]
+name = "rust-network-mgr"
+path = "src/main.rs"
+
+[[bin]]
+name = "rust-network-mgr-mcp"
+path = "src/mcp_server.rs"
+required-features = []

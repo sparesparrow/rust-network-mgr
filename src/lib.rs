@@ -1,10 +1,12 @@
 // Declare the modules that form the library's structure
+pub mod api;
+pub mod cli;
 pub mod config;
+pub mod docker;
 pub mod network;
 pub mod nftables;
 pub mod socket;
 pub mod types;
-pub mod docker;
 
 // Publicly export key types, functions, and modules needed by the binary or tests
 
@@ -35,17 +37,5 @@ pub use types::{
     NetworkState,
 };
 
-// Other potential public interfaces if needed
-// e.g., pub use docker::DockerMonitor;
-
-// You might also want a function to run the main application logic, called by main.rs
-// Example (needs more implementation based on main.rs logic):
-/*
-pub async fn run_daemon(config_path: Option<&std::path::Path>) -> Result<()> {
-    // ... initialization code from main.rs ...
-    // ... spawn tasks ...
-    // ... main event loop ...
-    // ... cleanup ...
-    Ok(())
-}
-*/ 
+// HTTP API
+pub use api::{ApiState, build_router, spawn_http_server};
