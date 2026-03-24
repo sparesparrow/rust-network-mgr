@@ -7,7 +7,6 @@ use tokio::sync::mpsc; // For channels
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
-use std::path::PathBuf;
 use tokio::sync::oneshot;
 use bollard;
 

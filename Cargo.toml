@@ -19,7 +19,6 @@ bench = true           # Is benchmarked by default.
 doc = true             # Is documented by default.
 proc-macro = false     # Set to `true` for a proc-macro library.
 harness = true         # Use libtest harness.
-edition = "2021"       # The edition of the target.
 crate-type = ["lib"]   # The crate types to generate.
 required-features = [] # Features required to build this target (N/A for lib).
 
@@ -61,10 +60,9 @@ nftables = "0.6" # Using the JSON API crate
 
 log = "0.4"
 env_logger = "0.10"
-rustable = "0.3.0"
 
 # CLI
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 
 # HTTP REST API
 axum = "0.7"

@@ -1,10 +1,5 @@
-use crate::types::{AppError, NetworkEvent, Result, NetworkState, EventSender, SystemEvent};
+use crate::types::{AppError, NetworkEvent, Result, EventSender, SystemEvent};
 use futures::stream::{StreamExt, TryStreamExt};
-// Import only the minimum necessary from rtnetlink
-use rtnetlink::{
-    new_connection,
-    constants::*, // Use correct path for constants
-};
 // Import the netlink_packet_core crate directly for the message types
 use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload,

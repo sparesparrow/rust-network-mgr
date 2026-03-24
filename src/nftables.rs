@@ -3,7 +3,7 @@
 use crate::types::{AppError, InterfaceConfig, NetworkState};
 use log::{debug, info};
 use std::collections::{HashMap, HashSet};
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use std::borrow::Cow;
@@ -14,7 +14,7 @@ use nftables::{
     helper, // NftablesError is now here
     // Import base types from nftables crate directly
     expr::Expression, // Need this for elements
-    schema::{NfCmd, NfListObject, NfObject, Table, Set, Element, FlushObject, SetTypeValue, SetFlag, Nftables}, // Nftables struct is in schema
+    schema::{NfCmd, NfListObject, NfObject, Table, Set, Element, FlushObject, Nftables},
     types::NfFamily, // Keep NfFamily here
 };
 

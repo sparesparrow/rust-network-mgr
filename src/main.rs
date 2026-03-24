@@ -5,7 +5,7 @@ use rust_network_mgr::network::NetworkMonitor;
 use rust_network_mgr::nftables::NftablesManager;
 use rust_network_mgr::socket::SocketHandler;
 use rust_network_mgr::types::{AppConfig, ControlCommand, NetworkEvent, Result, InterfaceConfig, NetworkState, SystemEvent, EventSender};
-use tokio::sync::mpsc::{channel, Sender, Receiver};
+use tokio::sync::mpsc::{channel, Receiver};
 
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -17,7 +17,6 @@ use tracing; // Assuming tracing is used
 
 // Channel buffer sizes
 const EVENT_CHANNEL_SIZE: usize = 100;
-const COMMAND_CHANNEL_SIZE: usize = 10;
 
 // Define AppState here since it's not in the types module
 struct AppState {

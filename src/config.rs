@@ -1,5 +1,4 @@
 use crate::types::{AppConfig, AppError, Result};
-use std::fs;
 use std::path::{Path, PathBuf};
 use directories::ProjectDirs;
 use log::{info, warn};
