@@ -1,0 +1,28 @@
+[Unit]
+Description=Rust Network Manager
+Documentation=https://github.com/sparesparrow/rust-network-mgr
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rust-network-mgr
+ExecReload=/bin/sh -c 'echo reload | socat - UNIX-CONNECT:/run/rust-network-manager/rust-network-manager.sock'
+Restart=on-failure
+RestartSec=5s
+
+# Run as root (required for netlink and nftables)
+User=root
+
+# Configuration
+Environment=RUST_LOG=info
+Environment=RUST_NETWORK_MGR_CONFIG=/etc/rust-network-mgr/config.yaml
+
+# Security hardening
+ProtectSystem=strict
+ReadWritePaths=/run/rust-network-manager /etc/nftables.conf
+PrivateTmp=true
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

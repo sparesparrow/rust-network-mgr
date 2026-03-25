@@ -1,9 +1,9 @@
 use crate::types::{AppError, ControlCommand, Result, EventSender, SystemEvent};
 use directories::ProjectDirs; // Changed from BaseDirs to ProjectDirs for runtime path
 use std::path::{Path, PathBuf};
-use tokio::io::{AsyncWriteExt, AsyncReadExt, BufReader, AsyncBufReadExt};
+use tokio::io::{AsyncWriteExt, BufReader, AsyncBufReadExt};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{mpsc, oneshot}; // Import mpsc and oneshot
+use tokio::sync::oneshot;
 use log::{info, warn, error}; // Keep log imports
 
 const SOCKET_FILE: &str = "rust-network-manager.sock";

@@ -6,7 +6,7 @@ use bollard::service::EventMessage; // Use this type for events
 use bollard::system::EventsOptions;
 use futures_util::stream::StreamExt;
 use tokio::sync::mpsc;
-use crate::types::{Result, AppError, DockerEvent, EventSender, SystemEvent};
+use crate::types::{Result, AppError, SystemEvent};
 use log::{info, error, warn};
 use bollard::container::InspectContainerOptions;
 use std::collections::HashMap;
