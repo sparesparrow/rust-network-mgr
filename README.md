@@ -1,4 +1,54 @@
-# Packet Router, Network Manager and IP monitor
+# rust-network-mgr
+
+[![crates.io](https://img.shields.io/crates/v/rust-network-mgr.svg)](https://crates.io/crates/rust-network-mgr)
+
+A Linux network-management daemon in Rust: it watches interface and IP-address changes over Netlink,
+keeps `nftables` sets in sync with **atomic** updates, can track Docker container IPs, and exposes its
+state through a local HTTP API and a Model Context Protocol (MCP) server for AI tools.
+
+It is a Rust redesign of [ipmon](https://github.com/sparesparrow/ipmon), a C++20 daemon with the same job.
+
+## Install
+
+The daemon is published on [crates.io](https://crates.io/crates/rust-network-mgr):
+
+```bash
+cargo install rust-network-mgr
+```
+
+The HTTP API and the MCP server (`rust-network-mgr-mcp`) are newer than the latest crates.io release;
+build them from this repository:
+
+```bash
+git clone https://github.com/sparesparrow/rust-network-mgr.git
+cd rust-network-mgr
+cargo build --release
+sudo ./target/release/rust-network-mgr          # needs root for nftables and Netlink
+./target/release/rust-network-mgr-mcp --api-url http://127.0.0.1:9100
+```
+
+## HTTP API
+
+The daemon serves a local API on `127.0.0.1:9100`:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /health` | Liveness |
+| `GET /status` | Full daemon status |
+| `GET /interfaces` | Interface → IP mapping |
+| `GET /containers` | Docker container → IP mapping |
+| `POST /reload` | Reload the YAML configuration |
+| `GET /metrics` | Metrics |
+
+## MCP server
+
+`rust-network-mgr-mcp` speaks JSON-RPC 2.0 over stdio and wraps the HTTP API for Claude Desktop, Cursor
+or Claude Code. Tools: `get_status`, `get_interfaces`, `get_containers`, `reload_config`, `ping_daemon`.
+Resources: `network://status`, `network://interfaces`, `network://containers`.
+
+## Design notes
+
+The rest of this document is the original design description.
 
 This document outlines a unified network management service written in Rust. It monitors network interface IP address changes and dynamically updates `nftables` sets accordingly. **Optionally, it can also monitor Docker container lifecycle events and track their IP addresses.** It is designed for Linux systems (Ubuntu/Debian) using `nftables`.
 
